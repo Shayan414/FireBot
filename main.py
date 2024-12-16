@@ -2,10 +2,42 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
+import datetime
+import sys
 import os
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Operating hours
+START_HOUR = 15   # 3 PM
+END_HOUR = 3    # 3 AM
+
+def is_within_hours():
+    """Check if the current time is within the bot's operating hours."""
+    now = datetime.datetime.now()
+    return START_HOUR <= now.hour < END_HOUR
+
+@tasks.loop(minutes=1)
+async def check_time():
+    """Periodically check if it's outside operating hours and stop the bot."""
+    if not is_within_hours():
+        print("Outside operating hours. Shutting down...")
+        await bot.close()
+        sys.exit()
+
+@bot.event
+async def on_ready():
+    print(f"{bot.user} has connected!")
+    if not is_within_hours():
+        print("Started outside operating hours. Shutting down...")
+        await bot.close()
+        sys.exit()
+    check_time.start()
+
+@bot.command()
+async def ping(ctx):
+    await ctx.send("Pong!")
 
 # Queue to manage songs (URL, Title)
 song_queue = []
