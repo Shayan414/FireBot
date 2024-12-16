@@ -1,13 +1,13 @@
 import discord
 from discord.ext import commands
 import yt_dlp
-import random
+import asyncio
 import os
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Queue to manage songs
+# Queue to manage songs (URL, Title)
 song_queue = []
 
 @bot.event
@@ -39,26 +39,29 @@ async def play(ctx, *, search_query):
 
     voice_client = ctx.voice_client
 
-    # Check if the input is a URL or a search query
+    # Fetch song information (title and URL)
     if "youtube.com" in search_query or "youtu.be" in search_query:
-        url = search_query
+        song_info = get_song_info(search_query)
     else:
         await ctx.send(f"Searching for: {search_query}")
-        url = search_youtube(search_query)
+        song_info = search_youtube(search_query)
+
+    if not song_info:
+        await ctx.send("Could not find the song.")
+        return
+
+    song_title = song_info['title']
+    song_url = song_info['url']
 
     if not voice_client.is_playing():
-        info = get_video_info(url)
-        if info:
-            await ctx.send(f"Playing: {info['title']}")
-            play_music(voice_client, url)
-        else:
-            await ctx.send("Could not find the video.")
+        await ctx.send(f"Playing: **{song_title}**")
+        play_music(voice_client, song_url)
     else:
-        song_queue.append(url)
-        await ctx.send(f"Added to queue: {url}")
+        song_queue.append((song_url, song_title))
+        await ctx.send(f"Added to queue: **{song_title}**")
 
 def search_youtube(query):
-    """Searches YouTube and returns the URL of the first video result."""
+    """Search YouTube and return the first video's title and URL."""
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
@@ -70,40 +73,41 @@ def search_youtube(query):
         info = ydl.extract_info(query, download=False)
         if 'entries' in info and len(info['entries']) > 0:
             first_result = info['entries'][0]
-            return first_result['url']
-        else:
+            return {'title': first_result.get('title', 'Unknown Title'), 'url': first_result['url']}
+    return None
+
+def get_song_info(url):
+    """Get song title and audio URL from a direct YouTube URL."""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+            return {'title': info.get('title', 'Unknown Title'), 'url': info['url']}
+        except Exception as e:
+            print(f"Error fetching song info: {e}")
             return None
 
-def get_video_info(url):
-    """Fetches video info such as title."""
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return {"title": info.get("title"), "url": info.get("url")} if info else None
-
-def play_music(voice_client, url):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        url2 = info['url']
-        source = discord.FFmpegPCMAudio(url2)
-        voice_client.play(source, after=lambda e: check_queue(voice_client))
+def play_music(voice_client, song_url):
+    """Play audio with FFmpeg."""
+    source = discord.FFmpegPCMAudio(song_url)
+    voice_client.play(source, after=lambda e: check_queue(voice_client))
 
 def check_queue(voice_client):
+    """Check and play the next song in the queue."""
     if song_queue:
         next_song = song_queue.pop(0)
-        play_music(voice_client, next_song)
+        song_url, song_title = next_song
+        play_music(voice_client, song_url)
+        asyncio.run_coroutine_threadsafe(
+            voice_client.channel.send(f"Now playing: **{song_title}**"), bot.loop
+        )
 
 @bot.command()
 async def skip(ctx):
+    """Skips the current song."""
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
         await ctx.send("Skipped!")
@@ -111,20 +115,8 @@ async def skip(ctx):
         await ctx.send("No song is currently playing.")
 
 @bot.command()
-async def queue(ctx):
-    if song_queue:
-        queue_list = "\n".join([f"{idx+1}. {url}" for idx, url in enumerate(song_queue)])
-        await ctx.send(f"Current Queue:\n{queue_list}")
-    else:
-        await ctx.send("The queue is empty.")
-
-@bot.command()
-async def clear(ctx):
-    song_queue.clear()
-    await ctx.send("The queue has been cleared!")
-
-@bot.command()
 async def pause(ctx):
+    """Pauses the currently playing song."""
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.pause()
         await ctx.send("Paused the music!")
@@ -133,10 +125,38 @@ async def pause(ctx):
 
 @bot.command()
 async def resume(ctx):
+    """Resumes the paused song."""
     if ctx.voice_client and ctx.voice_client.is_paused():
         ctx.voice_client.resume()
         await ctx.send("Resumed the music!")
     else:
         await ctx.send("The music is not paused.")
+
+@bot.command()
+async def queue(ctx):
+    """Displays the current song queue."""
+    if song_queue:
+        queue_list = "\n".join([f"{i+1}. {title}" for i, (_, title) in enumerate(song_queue)])
+        await ctx.send(f"**Current Queue:**\n{queue_list}")
+    else:
+        await ctx.send("The song queue is empty.")
+
+@bot.command()
+async def clear(ctx):
+    """Clears the entire song queue."""
+    global song_queue
+    song_queue = []
+    await ctx.send("Cleared the song queue!")
+
+@bot.command()
+async def stop(ctx):
+    """Stops playback and clears the queue."""
+    if ctx.voice_client:
+        ctx.voice_client.stop()
+        global song_queue
+        song_queue = []
+        await ctx.send("Stopped playback and cleared the queue!")
+    else:
+        await ctx.send("I'm not playing any music right now.")
 
 bot.run(os.getenv("DISCORD_TOKEN"))
